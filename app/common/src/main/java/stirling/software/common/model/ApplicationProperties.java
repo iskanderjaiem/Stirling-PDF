@@ -337,6 +337,7 @@ public class ApplicationProperties {
         private CffConverter cffConverter = new CffConverter();
         private Type3 type3 = new Type3();
         private String fallbackFont = "classpath:/static/fonts/NotoSans-Regular.ttf";
+        private String customFontsDirectory = "";
 
         @Data
         public static class Cache {

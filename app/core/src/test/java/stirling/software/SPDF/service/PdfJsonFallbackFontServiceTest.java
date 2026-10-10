@@ -12,7 +12,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Base64;
 
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -25,6 +28,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.DefaultResourceLoader;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -36,6 +41,7 @@ class PdfJsonFallbackFontServiceTest {
 
     private PdfJsonFallbackFontService service;
     private ApplicationProperties applicationProperties;
+    private ApplicationProperties.PdfEditor pdfEditor;
 
     // Parsing the real fallback TrueType fonts (the CJK font alone is ~17 MB) is the only expensive
     // work in this class. Build a default-config service and parse the CJK fallback once, then
@@ -81,7 +87,7 @@ class PdfJsonFallbackFontServiceTest {
 
         // Mock the properties chain so loadConfig() resolves to the default Noto Sans location.
         applicationProperties = mock(ApplicationProperties.class);
-        ApplicationProperties.PdfEditor pdfEditor = mock(ApplicationProperties.PdfEditor.class);
+        pdfEditor = mock(ApplicationProperties.PdfEditor.class);
         lenient().when(applicationProperties.getPdfEditor()).thenReturn(pdfEditor);
         lenient()
                 .when(pdfEditor.getFallbackFont())
@@ -369,6 +375,102 @@ class PdfJsonFallbackFontServiceTest {
             assertEquals(
                     PdfJsonFallbackFontService.FALLBACK_FONT_JP_ID,
                     service.resolveFallbackFontId("SomeCustomFont", 0x3042));
+        }
+    }
+
+    @Nested
+    @DisplayName("resolveFallbackFontId for families without an alias")
+    class UnaliasedFamilies {
+
+        @Test
+        @DisplayName("a bold sans family keeps its weight")
+        void boldSansKeepsWeight() {
+            assertEquals(
+                    "fallback-noto-sans-bold",
+                    service.resolveFallbackFontId("ABCDEF+Montserrat-Bold", 'é'));
+        }
+
+        @Test
+        @DisplayName("an italic serif family stays serif and italic")
+        void italicSerifStaysSerif() {
+            assertEquals(
+                    "fallback-liberation-serif-italic",
+                    service.resolveFallbackFontId("ABCDEF+Garamond-Italic", 'é'));
+        }
+
+        @Test
+        @DisplayName("a monospaced family stays monospaced")
+        void monospacedStaysMonospaced() {
+            assertEquals(
+                    "fallback-liberation-mono-bold",
+                    service.resolveFallbackFontId("Consolas-Bold", 'x'));
+        }
+
+        @Test
+        @DisplayName("a regular sans family keeps the configured fallback font")
+        void regularSansKeepsConfiguredFallback() {
+            assertEquals(
+                    PdfJsonFallbackFontService.FALLBACK_FONT_ID,
+                    service.resolveFallbackFontId("Montserrat-Regular", 'é'));
+        }
+
+        @Test
+        @DisplayName("a script with its own fallback wins over the family's style")
+        void scriptFallbackWinsOverStyle() {
+            assertEquals(
+                    PdfJsonFallbackFontService.FALLBACK_FONT_JP_ID,
+                    service.resolveFallbackFontId("Montserrat-Bold", 0x3042));
+        }
+    }
+
+    @Nested
+    @DisplayName("fonts of the custom fonts directory")
+    class CustomFonts {
+
+        @TempDir Path fontsDir;
+
+        @BeforeEach
+        void useFontsDirectory() throws Exception {
+            try (InputStream in =
+                    new ClassPathResource("static/fonts/NotoSans-Bold.ttf").getInputStream()) {
+                Files.copy(in, fontsDir.resolve("NotoSans-Bold.ttf"));
+            }
+            lenient().when(pdfEditor.getCustomFontsDirectory()).thenReturn(fontsDir.toString());
+            invokeLoadConfig();
+        }
+
+        @Test
+        @DisplayName("the PDF's own typeface wins over a built-in alias")
+        void ownTypefaceWinsOverAlias() {
+            assertEquals(
+                    "custom-notosansbold",
+                    service.resolveFallbackFontId("ABCDEF+NotoSans-Bold", 'é'));
+        }
+
+        @Test
+        @DisplayName("a family missing from the directory keeps the built-in fallback")
+        void missingFamilyKeepsBuiltInFallback() {
+            assertEquals(
+                    "fallback-liberation-sans-bold",
+                    service.resolveFallbackFontId("Arial-Bold", 'é'));
+        }
+
+        @Test
+        @DisplayName("a custom font loads into a document under its own name")
+        void customFontLoads() throws IOException {
+            try (PDDocument document = new PDDocument()) {
+                PDFont font = service.loadFallbackPdfFont(document, "custom-notosansbold");
+                assertTrue(font.getName().endsWith("NotoSans-Bold"));
+                assertTrue(service.canEncode(font, 'é'));
+            }
+        }
+
+        @Test
+        @DisplayName("a custom font's model carries its PostScript name")
+        void customFontModel() throws IOException {
+            PdfJsonFont model = service.buildFallbackFontModel("custom-notosansbold");
+            assertEquals("NotoSans-Bold", model.getBaseName());
+            assertEquals("ttf", model.getProgramFormat());
         }
     }
 

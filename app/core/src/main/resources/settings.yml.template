@@ -525,6 +525,7 @@ cluster:
 
 pdfEditor:
   fallback-font: classpath:/static/fonts/NotoSans-Regular.ttf # Override to point at a custom fallback font
+  custom-fonts-directory: '' # TrueType fonts (.ttf, .otf with TrueType outlines) used for characters a PDF's embedded subset font lacks, matched by PostScript name, then family and style. Empty means customFiles/fonts (/customFiles/fonts in Docker). Read at startup.
   cache:
     max-bytes: -1 # Max in-memory cache size in bytes; -1 disables byte cap
     max-percent: 20 # Max in-memory cache as % of JVM max; used when max-bytes <= 0

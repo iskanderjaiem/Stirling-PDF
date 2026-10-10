@@ -4,6 +4,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -22,6 +23,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 import stirling.software.SPDF.model.json.PdfJsonFont;
+import stirling.software.SPDF.service.pdfjson.CustomFontLibrary;
+import stirling.software.common.configuration.InstallationPathConfig;
 
 @Slf4j
 @Component
@@ -311,10 +314,16 @@ public class PdfJsonFallbackFontService {
                                     "classpath:/static/fonts/DejaVuSansMono-BoldOblique.ttf",
                                     "DejaVuSansMono-BoldOblique",
                                     "ttf")));
-    private static final Pattern BOLD_FONT_WEIGHT_PATTERN =
-            Pattern.compile(".*[_-]?[6-9]00(wght)?.*");
     private static final Pattern FONT_NAME_DELIMITER_PATTERN = Pattern.compile("[-_,+]");
     private static final Pattern WHITESPACE_PATTERN = Pattern.compile("\\s+");
+    // Matched against lowercase names without spaces; "sans" names are never treated as serif.
+    private static final Pattern MONOSPACED_FAMILY_PATTERN =
+            Pattern.compile("mono|courier|consol|menlo|inconsolata|typewriter|code");
+    private static final Pattern SERIF_FAMILY_PATTERN =
+            Pattern.compile(
+                    "serif|garamond|georgia|times|roman|minion|palatino|baskerville|antiqua"
+                            + "|cambria|caslon|didot|bodoni|merriweather|playfair|lora|charter"
+                            + "|century|constantia|cormorant|bookman|sabon|utopia");
     private static final Pattern PATTERN = Pattern.compile("^[A-Z]{6}\\+");
 
     private final ResourceLoader resourceLoader;
@@ -324,6 +333,8 @@ public class PdfJsonFallbackFontService {
     private String legacyFallbackFontLocation;
 
     private String fallbackFontLocation;
+
+    private CustomFontLibrary customFontLibrary;
 
     private final Map<String, byte[]> fallbackFontCache = new ConcurrentHashMap<>();
 
@@ -339,6 +350,15 @@ public class PdfJsonFallbackFontService {
             fallbackFontLocation = legacyFallbackFontLocation;
         }
         log.info("Using fallback font location: {}", fallbackFontLocation);
+
+        String fontsDirectory =
+                applicationProperties.getPdfEditor() != null
+                        ? applicationProperties.getPdfEditor().getCustomFontsDirectory()
+                        : null;
+        if (fontsDirectory == null || fontsDirectory.isBlank()) {
+            fontsDirectory = InstallationPathConfig.getCustomFilesPath() + "fonts";
+        }
+        customFontLibrary = new CustomFontLibrary(Path.of(fontsDirectory));
     }
 
     public PdfJsonFont buildFallbackFontModel() throws IOException {
@@ -419,6 +439,12 @@ public class PdfJsonFallbackFontService {
      * @return fallback font ID
      */
     public String resolveFallbackFontId(String originalFontName, int codePoint) {
+        if (customFontLibrary != null) {
+            var customFont = customFontLibrary.find(originalFontName, codePoint);
+            if (customFont.isPresent()) {
+                return customFont.get().id();
+            }
+        }
         // First try to match based on original font name for visual consistency
         if (originalFontName != null && !originalFontName.isEmpty()) {
             // Normalize font name: remove subset prefix (e.g. "PXAAAC+"), convert to lowercase,
@@ -440,8 +466,8 @@ public class PdfJsonFallbackFontService {
             String aliasedFontId = FONT_NAME_ALIASES.get(baseName);
             if (aliasedFontId != null) {
                 // Detect weight and style from the normalized font name
-                boolean isBold = detectBold(normalized);
-                boolean isItalic = detectItalic(normalized);
+                boolean isBold = CustomFontLibrary.isBoldName(normalized);
+                boolean isItalic = CustomFontLibrary.isItalicName(normalized);
 
                 // Apply weight/style suffix to fallback font ID
                 String styledFontId = applyWeightStyle(aliasedFontId, isBold, isItalic);
@@ -456,43 +482,37 @@ public class PdfJsonFallbackFontService {
                         styledFontId);
                 return styledFontId;
             }
+
+            String scriptFontId = resolveFallbackFontId(codePoint);
+            if (FALLBACK_FONT_ID.equals(scriptFontId)) {
+                return resolveLookalikeFontId(normalized, scriptFontId);
+            }
+            return scriptFontId;
         }
 
-        // Fall back to Unicode-based selection
         return resolveFallbackFontId(codePoint);
     }
 
     /**
-     * Detect if font name indicates bold weight.
-     *
-     * @param normalizedFontName lowercase font name without subset prefix or spaces
-     * @return true if bold weight is detected
+     * Picks a built-in font of the same kind (serif, monospaced or sans) and weight/style for a
+     * family with no alias. A regular sans family keeps {@code defaultFontId}, so a fallback font
+     * configured under {@code pdfEditor.fallback-font} still applies to it.
      */
-    private boolean detectBold(String normalizedFontName) {
-        // Check for explicit bold indicators
-        if (normalizedFontName.contains("bold")
-                || normalizedFontName.contains("heavy")
-                || normalizedFontName.contains("black")) {
-            return true;
+    private String resolveLookalikeFontId(String normalizedFontName, String defaultFontId) {
+        boolean isBold = CustomFontLibrary.isBoldName(normalizedFontName);
+        boolean isItalic = CustomFontLibrary.isItalicName(normalizedFontName);
+        String baseFontId;
+        if (MONOSPACED_FAMILY_PATTERN.matcher(normalizedFontName).find()) {
+            baseFontId = "fallback-liberation-mono";
+        } else if (!normalizedFontName.contains("sans")
+                && SERIF_FAMILY_PATTERN.matcher(normalizedFontName).find()) {
+            baseFontId = "fallback-liberation-serif";
+        } else if (isBold || isItalic) {
+            baseFontId = FALLBACK_FONT_ID;
+        } else {
+            return defaultFontId;
         }
-
-        // Check for numeric weight indicators (600-900 = bold)
-        // Handles: "Arimo_700wght", "Arial-700", "Font-w700"
-        if (BOLD_FONT_WEIGHT_PATTERN.matcher(normalizedFontName).matches()) {
-            return true;
-        }
-
-        return false;
-    }
-
-    /**
-     * Detect if font name indicates italic/oblique style.
-     *
-     * @param normalizedFontName lowercase font name without subset prefix or spaces
-     * @return true if italic style is detected
-     */
-    private boolean detectItalic(String normalizedFontName) {
-        return normalizedFontName.contains("italic") || normalizedFontName.contains("oblique");
+        return applyWeightStyle(baseFontId, isBold, isItalic);
     }
 
     /**
@@ -610,6 +630,19 @@ public class PdfJsonFallbackFontService {
             String baseName = inferBaseName(fallbackFontLocation, "NotoSans-Regular");
             String format = inferFormat(fallbackFontLocation, "ttf");
             return new FallbackFontSpec(fallbackFontLocation, baseName, format);
+        }
+        if (fallbackId != null
+                && fallbackId.startsWith(CustomFontLibrary.ID_PREFIX)
+                && customFontLibrary != null) {
+            return customFontLibrary
+                    .byId(fallbackId)
+                    .map(
+                            font ->
+                                    new FallbackFontSpec(
+                                            font.path().toUri().toString(),
+                                            font.postScriptName(),
+                                            font.format()))
+                    .orElse(null);
         }
         return BUILT_IN_FALLBACK_FONTS.get(fallbackId);
     }
