@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Calendar;
 import java.util.Collection;
@@ -3324,7 +3325,7 @@ public class PdfJsonConversionService {
                                 }
                                 try {
                                     contentStream.showText(
-                                            new String(encoded, StandardCharsets.ISO_8859_1));
+                                            textEncodingTo(run.font(), run.text(), encoded));
                                 } catch (IllegalArgumentException ex) {
                                     log.warn(
                                             "Failed to render text '{}' with font {} on page {}: {}",
@@ -4289,6 +4290,26 @@ public class PdfJsonConversionService {
             baos.write(code);
         }
         return baos.toByteArray();
+    }
+
+    /**
+     * The string {@code showText} turns back into exactly {@code encoded}: {@code showText} encodes
+     * again with the font, so the codes cannot simply be passed as Latin-1, which breaks every
+     * simple font code whose character differs from Latin-1 (WinAnsi 0x80-0x9F: ’ “ ” € – — …) and
+     * makes PDFBox reject the whole line. The run's own text is used when the font encodes it to
+     * the same codes.
+     */
+    private String textEncodingTo(PDFont font, String text, byte[] encoded) {
+        if (text != null && !(font instanceof PDType3Font)) {
+            try {
+                if (Arrays.equals(font.encode(text), encoded)) {
+                    return text;
+                }
+            } catch (IOException | IllegalArgumentException ignored) {
+                // Not the font's own encoding of the text: the codes stand as they are.
+            }
+        }
+        return new String(encoded, StandardCharsets.ISO_8859_1);
     }
 
     private byte[] sanitizeEncoded(byte[] encoded) {
